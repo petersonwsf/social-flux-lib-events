@@ -1,5 +1,6 @@
 package com.socialflux.events;
 
+import com.socialflux.events.logging.CorrelationId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -23,6 +24,7 @@ public class OutboxRelay {
     private final SocialFluxEventsProperties properties;
     private final Clock clock;
     private final TransactionTemplate tx;
+    private volatile boolean failing;
 
     public OutboxRelay(Outbox outbox, ObjectProvider<EventPublisher> publisher, SocialFluxEventsProperties properties,
                        Clock clock, PlatformTransactionManager txManager) {
@@ -41,8 +43,21 @@ public class OutboxRelay {
         try {
             publishPending();
         } catch (RuntimeException e) {
-            log.warn("Falha ao publicar eventos do outbox (tentará de novo): {}", e.toString());
+            reportFailure("Falha ao publicar eventos do outbox (tentará de novo): {}", e.toString());
         }
+    }
+
+    /**
+     * O relay roda a cada 0,5 s: com o broker fora do ar, só a primeira falha sobe como WARN (as seguintes ficam em DEBUG)
+     * e o retorno à normalidade é avisado uma vez. Evita milhares de linhas iguais no Loki.
+     */
+    private void reportFailure(String message, Object... args) {
+        if (failing) {
+            log.debug(message, args);
+            return;
+        }
+        failing = true;
+        log.warn(message, args);
     }
 
     /** Publica um lote e devolve quantos eventos foram enviados. */
@@ -54,14 +69,22 @@ public class OutboxRelay {
         Integer sent = tx.execute(status -> {
             int count = 0;
             for (Outbox.Row row : outbox.lockPending(properties.batchSize())) {
-                try {
-                    target.publish(row.id(), row.type(), row.payload());
-                } catch (RuntimeException e) {
-                    log.warn("Não foi possível publicar {} (fica pendente): {}", row.type(), e.toString());
-                    break; // preserva a ordem: não pula o evento que falhou
+                // Continua o fluxo que gravou o evento: o id vai para o log e para o cabeçalho da mensagem.
+                try (CorrelationId.Scope ignored = CorrelationId.open(row.correlationId())) {
+                    try {
+                        target.publish(row.id(), row.type(), row.payload());
+                    } catch (RuntimeException e) {
+                        reportFailure("Não foi possível publicar {} (fica pendente): {}", row.type(), e.toString());
+                        return count; // preserva a ordem: não pula o evento que falhou
+                    }
+                    outbox.markPublished(row.id());
+                    count++;
+                    if (failing) {
+                        failing = false;
+                        log.info("Publicação de eventos do outbox retomada");
+                    }
+                    log.info("Evento publicado: {} (id {})", row.type(), row.id());
                 }
-                outbox.markPublished(row.id());
-                count++;
             }
             return count;
         });

@@ -19,6 +19,9 @@ Decisão: D13 de [`../../docs/plano-dominio-relacoes-grafo-social.md`](../../doc
 | `EventEnvelope` | — | leitura do envelope `{id, type, occurredAt, aggregateId, aggregateVersion, data}` pelos consumidores |
 | `EventQueues` | — | `durable(nome)` (fila com DLX) e `bind(fila, exchange, padrão)` para o serviço declarar a **sua** fila |
 | `Clock` | só se o serviço não declarar um | relógio UTC padrão |
+| `CorrelationId` | — | id de correlação no MDC (`correlationId`): `current()`, `open(id)` (escopo `try-with-resources`), `isValid(...)`; cabeçalhos `X-Correlation-Id` (HTTP) e `x-correlation-id` (AMQP) |
+| `CorrelationIdFilter` | aplicação web servlet | primeiro filtro da cadeia: adota (se válido) ou cria o id, põe no MDC, devolve no cabeçalho da resposta e registra a linha de acesso |
+| `CorrelationIdClientInterceptor` | — | `ClientHttpRequestInterceptor` que repassa o id nas chamadas HTTP entre serviços (nunca em terceiros) |
 
 O que **não** está aqui: migrações (cada serviço cria as tabelas na sua própria migração Flyway), tipos de evento, handlers e
 filas de cada serviço.
@@ -59,6 +62,19 @@ filas de cada serviço.
 5. Para consumir: declare a fila e a ligação com `EventQueues` (condicionadas a `socialflux.events.enabled=true`), um
    `@RabbitListener` e, no handler, `EventEnvelope.parse(...)` + `inbox.once(event.id(), ...)`. Ignore tipos desconhecidos e
    `aggregateVersion` antigos. Exemplo real: `profile_service/.../events/Amqp.java` e `AccountEventHandler.java`.
+
+## Logs e correlation id
+
+O id de um fluxo (uma ação do usuário) atravessa os serviços e fica em cada linha de log (campo `correlationId` no JSON):
+
+1. O gateway (Caddy) cria o `X-Correlation-Id`; o `CorrelationIdFilter` o adota (só no formato `[A-Za-z0-9._-]{8,64}`; o resto é descartado e um novo é criado, o que impede injeção de linhas de log) e o devolve na resposta.
+2. `Outbox.add(...)` grava o id no envelope do evento (campo aditivo `correlationId`, opcional: consumidores antigos o ignoram). O relay roda em outra thread: ele reabre o escopo com o id gravado ao publicar (o log `Evento publicado: ...` já o carrega) e o `AmqpEventPublisher` o copia para o cabeçalho `x-correlation-id` da mensagem.
+3. Quem consome usa **`inbox.once(event, ...)`** (a sobrecarga com o `EventEnvelope`): ela restaura o id durante o efeito e registra `Evento consumido`, `Evento duplicado ignorado` ou `Falha ao processar o evento`.
+4. Chamadas HTTP entre serviços: `RestClient.builder().requestInterceptor(new CorrelationIdClientInterceptor())`.
+5. Trabalho fora de requisição/evento (`@Scheduled`, threads): `try (CorrelationId.Scope s = CorrelationId.open(null)) { ... }` (o MDC não atravessa threads).
+
+O relay só avisa a primeira falha de publicação (WARN) e a retomada (INFO); as repetições a cada 0,5 s ficam em DEBUG.
+`socialflux.logging.access-log` (padrão `true`) liga a linha de acesso; `socialflux.logging.quiet-paths` (padrão `/actuator`, `/internal/auth/verify`) lista os prefixos cuja linha de acesso vai para DEBUG.
 
 ## Configuração (`socialflux.events.*`)
 

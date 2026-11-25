@@ -36,6 +36,19 @@
             <artifactId>spring-boot-starter-jackson</artifactId>
         </dependency>
 
+        <!-- Correlation id HTTP (filtro + interceptor do RestClient): só compilação; os serviços já trazem o spring-web e o
+             servlet. A auto-configuração só liga com aplicação web servlet. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Testes -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -1,5 +1,8 @@
 package com.socialflux.events;
 
+import com.socialflux.events.logging.CorrelationId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,7 +24,10 @@ import java.util.UUID;
  */
 public class Outbox {
 
-    public record Row(UUID id, String type, String payload) {
+    private static final Logger log = LoggerFactory.getLogger(Outbox.class);
+
+    /** {@code correlationId} vem do envelope (pode ser {@code null} em eventos gravados antes do recurso existir). */
+    public record Row(UUID id, String type, String payload, String correlationId) {
     }
 
     private final JdbcClient jdbc;
@@ -49,6 +55,10 @@ public class Outbox {
         envelope.put("aggregateId", aggregateId.toString());
         envelope.put("aggregateVersion", aggregateVersion);
         envelope.put("data", data);
+        String correlationId = CorrelationId.current();
+        if (correlationId != null) {
+            envelope.put("correlationId", correlationId);   // o relay e os consumidores continuam o mesmo fluxo
+        }
         jdbc.sql("insert into outbox_event (id, type, aggregate_id, aggregate_version, payload, created_at) "
                         + "values (:id, :type, :aggregate, :version, :payload, :createdAt)")
                 .param("id", id)
@@ -58,6 +68,7 @@ public class Outbox {
                 .param("payload", mapper.writeValueAsString(envelope))
                 .param("createdAt", OffsetDateTime.ofInstant(now, ZoneOffset.UTC))
                 .update();
+        log.debug("Evento {} gravado no outbox (agregado {}, v{})", type, aggregateId, aggregateVersion);
     }
 
     /** Eventos ainda não publicados, em ordem, travados contra outras instâncias do relay. */
@@ -66,8 +77,20 @@ public class Outbox {
         return jdbc.sql("select id, type, payload from outbox_event where published_at is null "
                         + "order by seq limit :limit for update skip locked")
                 .param("limit", limit)
-                .query((rs, n) -> new Row(rs.getObject("id", UUID.class), rs.getString("type"), rs.getString("payload")))
+                .query((rs, n) -> {
+                    String payload = rs.getString("payload");
+                    return new Row(rs.getObject("id", UUID.class), rs.getString("type"), payload,
+                            correlationIdOf(payload));
+                })
                 .list();
+    }
+
+    private String correlationIdOf(String payload) {
+        try {
+            return mapper.readTree(payload).path("correlationId").asString(null);
+        } catch (RuntimeException e) {
+            return null;   // payload ilegível não impede a publicação; só perde o id de correlação
+        }
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
