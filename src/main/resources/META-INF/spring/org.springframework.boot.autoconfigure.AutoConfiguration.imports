@@ -1,1 +1,2 @@
 com.socialflux.events.SocialFluxEventsAutoConfiguration
+com.socialflux.events.logging.SocialFluxLoggingAutoConfiguration

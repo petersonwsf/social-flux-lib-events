@@ -1,5 +1,6 @@
 package com.socialflux.events;
 
+import com.socialflux.events.logging.CorrelationId;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
@@ -46,6 +47,10 @@ public class AmqpEventPublisher implements EventPublisher {
         properties.setContentEncoding(StandardCharsets.UTF_8.name());
         properties.setMessageId(messageId.toString());
         properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+        String correlationId = CorrelationId.current();
+        if (correlationId != null) {
+            properties.setHeader(CorrelationId.AMQP_HEADER, correlationId);   // visível no painel do RabbitMQ e na DLQ
+        }
         Message message = new Message(json.getBytes(StandardCharsets.UTF_8), properties);
         unroutable.remove(messageId.toString());
         template.invoke(operations -> {

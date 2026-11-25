@@ -20,6 +20,7 @@ libs/socialflux-events/
 ├── docs/ARCHITECTURE.md          este arquivo
 └── src/
     ├── main/java/com/socialflux/events/
+    │   └── logging/                  id de correlação (MDC), filtro HTTP, interceptor do RestClient
     ├── main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
     └── test/java/com/socialflux/events/
 ```
@@ -39,8 +40,19 @@ libs/socialflux-events/
 | `EventQueues.java` | Nomes da topologia (bean do exchange, DLX, fila de mortos) e atalhos para declarar fila durável com DLX e ligação |
 | `EventIds.java` | Gerador de UUIDv7 (`EventIds.v7(clock)`) para ids de eventos e de agregados dos serviços |
 
+## Arquivos (`com.socialflux.events.logging`)
+
+| Arquivo | O que representa |
+| --- | --- |
+| `CorrelationId.java` | Utilitário do id de correlação no MDC (`correlationId`): `current()`, `open(id)` com escopo que restaura o id anterior, validação do formato (anti injeção de linhas de log) |
+| `CorrelationIdFilter.java` | Filtro servlet de maior precedência: adota ou cria o `X-Correlation-Id`, devolve na resposta, limpa o MDC ao final e registra a linha de acesso (método, caminho sem query, status, duração) |
+| `CorrelationIdClientInterceptor.java` | Repassa o id nas chamadas HTTP entre serviços (RestClient/RestTemplate) |
+| `SocialFluxLoggingProperties.java` | Propriedades `socialflux.logging.*` (`access-log`, `quiet-paths`) |
+| `SocialFluxLoggingAutoConfiguration.java` | Registra o filtro só em aplicação web servlet (spring-web e servlet são dependências `optional` da biblioteca) |
+
 ## Testes (`src/test`)
 
 | Arquivo | O que cobre |
 | --- | --- |
-| `SocialFluxEventsTest.java` | Outbox exige transação; relay publica em ordem com o envelope correto; falha de publicação mantém pendente e a ordem; inbox executa uma vez e não registra se o efeito falha; envelope inválido; beans do broker só com `enabled=true`; configuração inválida falha ao subir |
+| `logging/CorrelationIdFilterTest.java` | O filtro adota o id válido, gera um novo para ausente/inseguro (CR/LF, curto, longo), devolve no cabeçalho e limpa o MDC mesmo com erro; o escopo restaura o id anterior |
+| `SocialFluxEventsTest.java` | O id de correlação viaja do outbox até o consumidor (relay e inbox); id inválido no envelope é ignorado; Outbox exige transação; relay publica em ordem com o envelope correto; falha de publicação mantém pendente e a ordem; inbox executa uma vez e não registra se o efeito falha; envelope inválido; beans do broker só com `enabled=true`; configuração inválida falha ao subir |

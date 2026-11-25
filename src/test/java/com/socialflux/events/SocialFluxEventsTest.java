@@ -1,5 +1,6 @@
 package com.socialflux.events;
 
+import com.socialflux.events.logging.CorrelationId;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,6 +104,38 @@ class SocialFluxEventsTest {
             assertThat(outbox.countPending()).isZero();
             assertThat(ctx.getBean(OutboxRelay.class).publishPending()).isZero();
         });
+    }
+
+    @Test
+    void correlationIdTravelsFromTheOutboxToTheConsumer() {
+        runner.run(ctx -> {
+            Outbox outbox = ctx.getBean(Outbox.class);
+            Recording publisher = ctx.getBean(Recording.class);
+            try (CorrelationId.Scope ignored = CorrelationId.open("fluxo-de-teste-123")) {
+                inTransaction(ctx.getBean(PlatformTransactionManager.class),
+                        () -> outbox.add("teste.criado.v1", UUID.randomUUID(), 1, Map.of()));
+            }
+            assertThat(CorrelationId.current()).isNull();   // o escopo foi fechado
+
+            ctx.getBean(OutboxRelay.class).publishPending();
+
+            // O relay roda em outra thread/escopo: o id vem do envelope gravado, não do MDC de quem gravou.
+            assertThat(publisher.sent.get(0).correlationId()).isEqualTo("fluxo-de-teste-123");
+            EventEnvelope envelope = EventEnvelope.parse(JsonMapper.builder().build(), publisher.sent.get(0).json());
+            assertThat(envelope.correlationId()).isEqualTo("fluxo-de-teste-123");
+
+            AtomicReference<String> seen = new AtomicReference<>();
+            assertThat(ctx.getBean(Inbox.class).once(envelope, () -> seen.set(CorrelationId.current()))).isTrue();
+            assertThat(seen.get()).isEqualTo("fluxo-de-teste-123");
+            assertThat(CorrelationId.current()).isNull();
+        });
+    }
+
+    @Test
+    void envelopeIgnoresAnInvalidCorrelationId() {
+        String json = "{\"id\":\"" + UUID.randomUUID() + "\",\"type\":\"x.v1\",\"aggregateId\":\"" + UUID.randomUUID()
+                + "\",\"correlationId\":\"x\\ny\"}";
+        assertThat(EventEnvelope.parse(JsonMapper.builder().build(), json).correlationId()).isNull();
     }
 
     @Test
@@ -231,7 +265,7 @@ class SocialFluxEventsTest {
     /** Substitui o RabbitMQ: guarda o que foi publicado e simula falha numa chamada específica. */
     static class Recording implements EventPublisher {
 
-        record Sent(UUID id, String routingKey, String json) {
+        record Sent(UUID id, String routingKey, String json, String correlationId) {
         }
 
         final List<Sent> sent = new CopyOnWriteArrayList<>();
@@ -243,7 +277,7 @@ class SocialFluxEventsTest {
             if (calls.incrementAndGet() == failOnCall) {
                 throw new IllegalStateException("broker fora do ar (simulado)");
             }
-            sent.add(new Sent(messageId, routingKey, json));
+            sent.add(new Sent(messageId, routingKey, json, CorrelationId.current()));
         }
     }
 }
